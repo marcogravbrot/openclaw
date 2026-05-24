@@ -79,6 +79,84 @@ export function createDiscordDraftPreviewController(params: {
   let finalizedViaPreviewMessage = false;
   let finalReplyStarted = false;
   let finalReplyDelivered = false;
+
+  // ── camus/discord-streaming-fix ─────────────────────────────────────────────
+  // Chronological timeline of segments for "partial" mode, so each text block
+  // and each tool call summary appends to the same Discord message instead of
+  // overwriting prior content. See extensions/discord/CAMUS_PATCH.md.
+  type CamusTextSegment = { kind: "text"; text: string };
+  type CamusToolSegment = {
+    kind: "tool";
+    key: string;
+    line: string | ChannelProgressDraftLine;
+  };
+  type CamusSegment = CamusTextSegment | CamusToolSegment;
+  const camusTimeline: CamusSegment[] = [];
+  let camusActiveText = "";
+
+  const camusToolKey = (line: string | ChannelProgressDraftLine): string => {
+    if (typeof line === "string") return `string:${line}`;
+    const name = line.toolName ?? "tool";
+    const kind = line.kind ?? "";
+    const detail =
+      typeof line.detail === "string" ? line.detail.slice(0, 40) : "";
+    return `${name}|${kind}|${detail}`;
+  };
+
+  const camusCommitActiveText = () => {
+    if (camusActiveText.trim().length === 0) {
+      camusActiveText = "";
+      return;
+    }
+    camusTimeline.push({ kind: "text", text: camusActiveText });
+    camusActiveText = "";
+  };
+
+  const camusFormatToolLine = (line: string | ChannelProgressDraftLine): string => {
+    if (typeof line === "string") return `> ${line}`;
+    const name = line.toolName ?? "tool";
+    const status = line.status ? ` [${line.status}]` : "";
+    const detail = line.detail ? `: ${line.detail}` : "";
+    return `> 🔧 \`${name}\`${status}${detail}`;
+  };
+
+  const camusRender = (): string => {
+    const parts: string[] = [];
+    for (const seg of camusTimeline) {
+      if (seg.kind === "text") parts.push(seg.text);
+      else parts.push(camusFormatToolLine(seg.line));
+    }
+    if (camusActiveText) parts.push(camusActiveText);
+    return parts.join("\n\n");
+  };
+
+  const camusUpdateStream = () => {
+    if (!draftStream) return;
+    let body = camusRender();
+    if (!body) return;
+    if (body.length > draftMaxChars) {
+      // Seal what we have into a separate Discord message and restart the
+      // timeline with the latest active content only.
+      params.log(
+        `discord(camus): timeline exceeded ${draftMaxChars} chars (${body.length}); forcing new message`,
+      );
+      draftStream.forceNewMessage();
+      const tail = camusActiveText || "";
+      camusTimeline.length = 0;
+      camusActiveText = tail;
+      body = camusRender();
+      if (!body) return;
+    }
+    hasStreamedMessage = true;
+    lastPartialText = body;
+    draftStream.update(body);
+  };
+
+  const camusResetTimeline = () => {
+    camusTimeline.length = 0;
+    camusActiveText = "";
+  };
+  // ── /camus ──────────────────────────────────────────────────────────────────
   const previewToolProgressEnabled =
     Boolean(draftStream) && resolveChannelStreamingPreviewToolProgress(params.discordConfig);
   const suppressDefaultToolProgressMessages =
@@ -191,6 +269,19 @@ export function createDiscordDraftPreviewController(params: {
       }
       const progressLine: string | ChannelProgressDraftLine =
         typeof line === "object" && line !== undefined ? line : normalized;
+      if (discordStreamMode === "partial") {
+        // camus: keep tool calls in the chronological timeline.
+        camusCommitActiveText();
+        const key = camusToolKey(progressLine);
+        const last = camusTimeline[camusTimeline.length - 1];
+        if (last && last.kind === "tool" && last.key === key) {
+          last.line = progressLine;
+        } else {
+          camusTimeline.push({ kind: "tool", key, line: progressLine });
+        }
+        camusUpdateStream();
+        return;
+      }
       if (discordStreamMode !== "progress") {
         if (!previewToolProgressEnabled || previewToolProgressSuppressed) {
           return;
@@ -270,6 +361,13 @@ export function createDiscordDraftPreviewController(params: {
       if (typeof text !== "string") {
         return undefined;
       }
+      if (discordStreamMode === "partial") {
+        // camus: the timeline IS the final message — don't replace it.
+        // Commit any trailing active text so the sealed preview is complete.
+        camusCommitActiveText();
+        camusUpdateStream();
+        return undefined;
+      }
       const formatted = convertMarkdownTables(
         stripInlineDirectiveTagsForDelivery(text).text,
         params.tableMode,
@@ -319,15 +417,18 @@ export function createDiscordDraftPreviewController(params: {
       previewToolProgressLines = [];
       hasStreamedMessage = true;
       if (discordStreamMode === "partial") {
+        // camus: track the in-progress assistant block in `camusActiveText`
+        // rather than overwriting the whole message. Prior text/tool segments
+        // already in the timeline stay above this active text.
         if (
-          lastPartialText &&
-          lastPartialText.startsWith(cleaned) &&
-          cleaned.length < lastPartialText.length
+          camusActiveText &&
+          camusActiveText.startsWith(cleaned) &&
+          cleaned.length < camusActiveText.length
         ) {
           return;
         }
-        lastPartialText = cleaned;
-        draftStream.update(cleaned);
+        camusActiveText = cleaned;
+        camusUpdateStream();
         return;
       }
 
@@ -358,6 +459,13 @@ export function createDiscordDraftPreviewController(params: {
     },
     handleAssistantMessageBoundary() {
       if (discordStreamMode === "progress") {
+        return;
+      }
+      if (discordStreamMode === "partial") {
+        // camus: commit the in-progress assistant block to the timeline so the
+        // next text block is appended below rather than replacing it.
+        camusCommitActiveText();
+        camusUpdateStream();
         return;
       }
       forceNewMessageIfNeeded();
@@ -392,6 +500,7 @@ export function createDiscordDraftPreviewController(params: {
       } catch (err) {
         params.log(`discord: draft cleanup failed: ${String(err)}`);
       }
+      camusResetTimeline();
     },
   };
 }

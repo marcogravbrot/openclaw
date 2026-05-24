@@ -132,14 +132,13 @@ export function createDiscordDraftPreviewController(params: {
 
   const camusFormatToolLine = (line: string | ChannelProgressDraftLine): string => {
     if (typeof line === "string") return `> ${line}`;
-    // The plugin-sdk builder already produces a human-readable line (e.g.
-    // "Bash: print text", "Read: claude-live-session.ts:760-800",
-    // "stage git changes"). Prefer it; fall back to a manual format if the
-    // line object came from somewhere that didn't populate `text`.
+    // `line.text` from the plugin-sdk builder is the fully-rendered display
+    // string and already begins with the tool's emoji (e.g. "📖 Read: foo.ts",
+    // "🛠️ echo hello", "🛠️ stage git changes"). Just wrap it in a Discord
+    // blockquote — don't add another emoji or backticks.
     if (typeof line.text === "string" && line.text.trim()) {
-      const icon = line.icon ? `${line.icon} ` : "🔧 ";
       const status = line.status ? ` [${line.status}]` : "";
-      return `> ${icon}${line.text.trim()}${status}`;
+      return `> ${line.text.trim()}${status}`;
     }
     const name = line.toolName ?? "tool";
     const status = line.status ? ` [${line.status}]` : "";

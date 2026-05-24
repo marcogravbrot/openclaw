@@ -561,8 +561,30 @@ export function createDiscordDraftPreviewController(params: {
         if (!finalReplyDelivered) {
           await draftStream?.discardPending();
         }
-        if (!finalReplyDelivered && !finalizedViaPreviewMessage && draftStream?.messageId()) {
-          await draftStream.clear();
+        // camus: in partial mode, if we have already streamed visible content
+        // to a Discord draft and no final reply was delivered (e.g. the agent
+        // returned an empty response after running a background task), SEAL
+        // the message instead of CLEARING it. Clearing deletes the streamed
+        // body the user has already seen, which is destructive and surprising.
+        // Sealing keeps the streamed content in place as the final message.
+        const hasStreamedPartialBody =
+          discordStreamMode === "partial" &&
+          (camusTimeline.length > 0 || camusActiveText.trim().length > 0);
+        if (
+          !finalReplyDelivered &&
+          !finalizedViaPreviewMessage &&
+          draftStream?.messageId()
+        ) {
+          if (hasStreamedPartialBody) {
+            // Flush any in-flight active text into the timeline first so the
+            // sealed message contains everything the runtime delivered.
+            camusCommitActiveText();
+            camusUpdateStream();
+            await draftStream.flush();
+            await draftStream.seal();
+          } else {
+            await draftStream.clear();
+          }
         }
       } catch (err) {
         params.log(`discord: draft cleanup failed: ${String(err)}`);

@@ -551,7 +551,7 @@ function handleClaudeLiveLine(session: ClaudeLiveSession, line: string): void {
     const hookName = typeof parsed.hook_name === "string" ? parsed.hook_name : "?";
     const outcome = typeof parsed.outcome === "string" ? ` outcome=${parsed.outcome}` : "";
     const exitCode = typeof parsed.exit_code === "number" ? ` exit=${parsed.exit_code}` : "";
-    cliBackendLog.info(
+    cliBackendLog.debug(
       `claude hook event: subtype=${parsed.subtype} hook=${hookName}${outcome}${exitCode}`,
     );
   }

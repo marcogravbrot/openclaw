@@ -480,6 +480,36 @@ export async function executePreparedCliRun(
                 },
               });
             },
+            onAssistantMessage: () => {
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "assistant",
+                data: { phase: "message-start" },
+              });
+            },
+            onToolUse: ({ name, toolCallId, args: toolArgs }) => {
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "tool",
+                data: {
+                  phase: "start",
+                  name,
+                  toolCallId,
+                  args: toolArgs,
+                },
+              });
+            },
+            onToolResult: ({ toolCallId, isError }) => {
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "tool",
+                data: {
+                  phase: "result",
+                  toolCallId,
+                  isError: isError === true ? true : false,
+                },
+              });
+            },
             cleanup: async () => {
               try {
                 await claudeSkillsPlugin.cleanup();
@@ -516,6 +546,36 @@ export async function executePreparedCliRun(
                       delta,
                       context.backendResolved.textTransforms?.output,
                     ),
+                  },
+                });
+              },
+              onAssistantMessage: () => {
+                emitAgentEvent({
+                  runId: params.runId,
+                  stream: "assistant",
+                  data: { phase: "message-start" },
+                });
+              },
+              onToolUse: ({ name, toolCallId, args: toolArgs }) => {
+                emitAgentEvent({
+                  runId: params.runId,
+                  stream: "tool",
+                  data: {
+                    phase: "start",
+                    name,
+                    toolCallId,
+                    args: toolArgs,
+                  },
+                });
+              },
+              onToolResult: ({ toolCallId, isError }) => {
+                emitAgentEvent({
+                  runId: params.runId,
+                  stream: "tool",
+                  data: {
+                    phase: "result",
+                    toolCallId,
+                    isError: isError === true ? true : false,
                   },
                 });
               },

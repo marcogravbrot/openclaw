@@ -393,10 +393,27 @@ function parseClaudeCliStreamingDelta(params: {
   };
 }
 
+export type CliStreamingToolUse = {
+  name: string;
+  toolCallId: string;
+  args?: Record<string, unknown>;
+};
+
+export type CliStreamingToolResult = {
+  toolCallId: string;
+  isError?: boolean;
+};
+
 export function createCliJsonlStreamingParser(params: {
   backend: CliBackendConfig;
   providerId: string;
   onAssistantDelta: (delta: CliStreamingDelta) => void;
+  /** Fired once per assistant message record (claude-cli `type:"assistant"`), signalling a block boundary. */
+  onAssistantMessage?: () => void;
+  /** Fired once per `tool_use` block detected in an assistant message. */
+  onToolUse?: (info: CliStreamingToolUse) => void;
+  /** Fired once per `tool_result` block detected in a user message. */
+  onToolResult?: (info: CliStreamingToolResult) => void;
 }) {
   let lineBuffer = "";
   let assistantText = "";
@@ -404,6 +421,43 @@ export function createCliJsonlStreamingParser(params: {
   let usage: CliUsage | undefined;
   let output: CliOutput | null = null;
   const texts: string[] = [];
+  const seenToolUseIds = new Set<string>();
+  const seenToolResultIds = new Set<string>();
+
+  const emitToolUsesFromAssistant = (parsed: Record<string, unknown>): void => {
+    if (!params.onToolUse) return;
+    const message = isRecord(parsed.message) ? parsed.message : null;
+    if (!message) return;
+    const content = Array.isArray(message.content) ? message.content : null;
+    if (!content) return;
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== "tool_use") continue;
+      const toolCallId = typeof block.id === "string" ? block.id : "";
+      if (!toolCallId || seenToolUseIds.has(toolCallId)) continue;
+      seenToolUseIds.add(toolCallId);
+      const name = typeof block.name === "string" ? block.name : "";
+      const args = isRecord(block.input) ? (block.input as Record<string, unknown>) : undefined;
+      params.onToolUse({ name, toolCallId, args });
+    }
+  };
+
+  const emitToolResultsFromUser = (parsed: Record<string, unknown>): void => {
+    if (!params.onToolResult) return;
+    const message = isRecord(parsed.message) ? parsed.message : null;
+    if (!message) return;
+    const content = Array.isArray(message.content) ? message.content : null;
+    if (!content) return;
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== "tool_result") continue;
+      const toolCallId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+      if (!toolCallId || seenToolResultIds.has(toolCallId)) continue;
+      seenToolResultIds.add(toolCallId);
+      params.onToolResult({
+        toolCallId,
+        isError: block.is_error === true ? true : undefined,
+      });
+    }
+  };
 
   const handleParsedRecord = (parsed: Record<string, unknown>) => {
     sessionId = pickCliSessionId(parsed, params.backend) ?? sessionId;
@@ -431,6 +485,13 @@ export function createCliJsonlStreamingParser(params: {
     if (result) {
       output = result;
       return;
+    }
+
+    if (parsed.type === "assistant") {
+      params.onAssistantMessage?.();
+      emitToolUsesFromAssistant(parsed);
+    } else if (parsed.type === "user") {
+      emitToolResultsFromUser(parsed);
     }
 
     const item = isRecord(parsed.item) ? parsed.item : null;

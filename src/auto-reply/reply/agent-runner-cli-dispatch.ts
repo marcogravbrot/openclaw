@@ -54,6 +54,76 @@ function createAssistantTextBridge(params: {
   };
 }
 
+function createAssistantMessageStartBridge(params: {
+  runId: string;
+  suppressed?: boolean;
+  notify?: () => Promise<void> | void;
+}) {
+  const notify = params.notify;
+  if (!notify) {
+    return {
+      unsubscribe: () => undefined,
+      drain: async (): Promise<void> => undefined,
+    };
+  }
+  let unsubscribed = false;
+  let delivery = Promise.resolve();
+  const rawUnsubscribe = onAgentEvent((evt) => {
+    if (evt.runId !== params.runId || evt.stream !== "assistant") return;
+    if (params.suppressed) return;
+    if (evt.data.phase !== "message-start") return;
+    delivery = delivery.then(() => Promise.resolve(notify())).catch(() => undefined);
+  });
+  return {
+    unsubscribe() {
+      if (unsubscribed) return;
+      unsubscribed = true;
+      rawUnsubscribe();
+    },
+    async drain(): Promise<void> {
+      await delivery;
+    },
+  };
+}
+
+function createAgentEventBridge(params: {
+  runId: string;
+  suppressed?: boolean;
+  onAgentEvent?: (evt: {
+    stream: string;
+    data: Record<string, unknown>;
+  }) => Promise<void> | void;
+  streams: ReadonlyArray<string>;
+}) {
+  const handler = params.onAgentEvent;
+  if (!handler) {
+    return {
+      unsubscribe: () => undefined,
+      drain: async (): Promise<void> => undefined,
+    };
+  }
+  const accepted = new Set(params.streams);
+  let unsubscribed = false;
+  let delivery = Promise.resolve();
+  const rawUnsubscribe = onAgentEvent((evt) => {
+    if (evt.runId !== params.runId) return;
+    if (params.suppressed) return;
+    if (!accepted.has(evt.stream)) return;
+    const payload = { stream: evt.stream, data: evt.data };
+    delivery = delivery.then(() => Promise.resolve(handler(payload))).catch(() => undefined);
+  });
+  return {
+    unsubscribe() {
+      if (unsubscribed) return;
+      unsubscribed = true;
+      rawUnsubscribe();
+    },
+    async drain(): Promise<void> {
+      await delivery;
+    },
+  };
+}
+
 export async function runCliAgentWithLifecycle(params: {
   runId: string;
   provider: string;
@@ -65,6 +135,11 @@ export async function runCliAgentWithLifecycle(params: {
   suppressAssistantBridge?: boolean;
   onAssistantText?: (text: string) => Promise<void>;
   onReasoningText?: (text: string) => Promise<void>;
+  onAssistantMessageStart?: () => Promise<void> | void;
+  onAgentEvent?: (evt: {
+    stream: string;
+    data: Record<string, unknown>;
+  }) => Promise<void> | void;
   onErrorBeforeLifecycle?: (err: unknown) => Promise<void>;
   transformResult?: (result: EmbeddedPiRunResult) => EmbeddedPiRunResult;
 }): Promise<EmbeddedPiRunResult> {
@@ -94,14 +169,35 @@ export async function runCliAgentWithLifecycle(params: {
       ? params.onReasoningText
       : undefined,
   });
+  const messageStartBridge = createAssistantMessageStartBridge({
+    runId: params.runId,
+    suppressed: params.suppressAssistantBridge,
+    notify: params.onAssistantMessageStart,
+  });
+  const toolEventBridge = createAgentEventBridge({
+    runId: params.runId,
+    suppressed: params.suppressAssistantBridge,
+    onAgentEvent: params.onAgentEvent,
+    streams: ["tool", "item", "plan", "command_output", "patch"],
+  });
+  const unsubscribeAllBridges = () => {
+    assistantBridge.unsubscribe();
+    reasoningBridge.unsubscribe();
+    messageStartBridge.unsubscribe();
+    toolEventBridge.unsubscribe();
+  };
+  const drainAllBridges = async () => {
+    await assistantBridge.drain();
+    await reasoningBridge.drain();
+    await messageStartBridge.drain();
+    await toolEventBridge.drain();
+  };
   let lifecycleTerminalEmitted = false;
   try {
     const rawResult = await runCliAgent(params.runParams);
     const result = params.transformResult?.(rawResult) ?? rawResult;
-    assistantBridge.unsubscribe();
-    reasoningBridge.unsubscribe();
-    await assistantBridge.drain();
-    await reasoningBridge.drain();
+    unsubscribeAllBridges();
+    await drainAllBridges();
 
     const cliText = normalizeOptionalString(result.payloads?.[0]?.text);
     if (cliText) {
@@ -126,10 +222,8 @@ export async function runCliAgentWithLifecycle(params: {
     }
     return result;
   } catch (err) {
-    assistantBridge.unsubscribe();
-    reasoningBridge.unsubscribe();
-    await assistantBridge.drain();
-    await reasoningBridge.drain();
+    unsubscribeAllBridges();
+    await drainAllBridges();
     await params.onErrorBeforeLifecycle?.(err);
     if (emitLifecycleTerminal) {
       emitAgentEvent({
@@ -146,8 +240,7 @@ export async function runCliAgentWithLifecycle(params: {
     }
     throw err;
   } finally {
-    assistantBridge.unsubscribe();
-    reasoningBridge.unsubscribe();
+    unsubscribeAllBridges();
     if (emitLifecycleTerminal && !lifecycleTerminalEmitted) {
       emitAgentEvent({
         runId: params.runId,

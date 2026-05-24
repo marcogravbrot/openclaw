@@ -1747,6 +1747,30 @@ export async function runAgentTurnWithFallback(params: {
               onReasoningText: async (text) => {
                 await params.opts?.onReasoningStream?.({ text });
               },
+              onAssistantMessageStart: async () => {
+                await params.typingSignals.signalMessageStart();
+                await params.opts?.onAssistantMessageStart?.();
+              },
+              onAgentEvent: async (evt) => {
+                if (evt.stream !== "tool") return;
+                const phase = readStringValue(evt.data.phase) ?? "";
+                if (phase !== "start" && phase !== "update") return;
+                const name = readStringValue(evt.data.name);
+                if (!name) return;
+                const args =
+                  evt.data.args && typeof evt.data.args === "object"
+                    ? (evt.data.args as Record<string, unknown>)
+                    : undefined;
+                await Promise.all([
+                  params.typingSignals.signalToolStart(),
+                  params.opts?.onToolStart?.({
+                    name,
+                    phase,
+                    args,
+                    detailMode: params.toolProgressDetail,
+                  }),
+                ]);
+              },
               onErrorBeforeLifecycle: async () => {
                 if (!rollbackFallbackCandidateSelection) {
                   return;

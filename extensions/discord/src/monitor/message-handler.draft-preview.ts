@@ -93,31 +93,21 @@ export function createDiscordDraftPreviewController(params: {
   type CamusSegment = CamusTextSegment | CamusToolSegment;
   const camusTimeline: CamusSegment[] = [];
   let camusActiveText = "";
-  // Raw cumulative text from the runtime, without injected paragraph breaks.
-  // Used to detect when the next partial extends the prior content vs. replaces it.
+  // Cumulative cleaned text last seen from the runtime; used for shrink detection
+  // (claude-cli sometimes sends a shorter cumulative snapshot mid-turn — ignore those).
   let camusRawActive = "";
-
-  // Inject `\n\n` between adjacent bold-marker block boundaries in cumulative
-  // text from claude-cli (which concatenates message blocks without separators).
-  // Skips inline code and fenced code blocks so literal `**` content is preserved.
-  const camusInjectBoundaries = (text: string): string => {
-    if (!text) return text;
-    const parts: string[] = [];
-    const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-    const splitOutside = (segment: string): string =>
-      segment
-        .replace(/\*\*\*\*/g, "**\n\n**")
-        .replace(/(?<=[^\s*\n])\*\*(?=[^*\s\n])/g, "\n\n**");
-    while ((match = codeRe.exec(text)) !== null) {
-      parts.push(splitOutside(text.slice(last, match.index)));
-      parts.push(match[0]);
-      last = match.index + match[0].length;
-    }
-    parts.push(splitOutside(text.slice(last)));
-    return parts.join("");
-  };
+  // Number of characters in the cumulative cleaned text already committed to the
+  // timeline (as text segments) via assistant-message-boundary / tool-progress
+  // events. The next partial peels active text off as `cleaned.slice(committedLen)`.
+  // This gives us real per-block separation driven by runtime events instead of
+  // text-content heuristics.
+  let camusCommittedLen = 0;
+  // OPENCLAW_DISCORD_HIDE_TOOL_PROGRESS=1|true|yes hides the tool-call lines
+  // (🔧 Bash, 🔧 Read, etc.) in the partial-mode timeline. The boundary commit
+  // around each tool still fires, so paragraph separation is unaffected.
+  const camusShowToolProgress = !/^(?:1|true|yes|on)$/i.test(
+    process.env.OPENCLAW_DISCORD_HIDE_TOOL_PROGRESS ?? "",
+  );
 
   const camusToolKey = (line: string | ChannelProgressDraftLine): string => {
     if (typeof line === "string") return `string:${line}`;
@@ -129,14 +119,15 @@ export function createDiscordDraftPreviewController(params: {
   };
 
   const camusCommitActiveText = () => {
+    // Advance the committed-length cursor regardless — this is what makes future
+    // partials peel new text off correctly when an event-driven boundary fires.
+    camusCommittedLen = camusRawActive.length;
     if (camusActiveText.trim().length === 0) {
       camusActiveText = "";
-      camusRawActive = "";
       return;
     }
     camusTimeline.push({ kind: "text", text: camusActiveText });
     camusActiveText = "";
-    camusRawActive = "";
   };
 
   const camusFormatToolLine = (line: string | ChannelProgressDraftLine): string => {
@@ -183,6 +174,7 @@ export function createDiscordDraftPreviewController(params: {
     camusTimeline.length = 0;
     camusActiveText = "";
     camusRawActive = "";
+    camusCommittedLen = 0;
   };
   // ── /camus ──────────────────────────────────────────────────────────────────
   const previewToolProgressEnabled =
@@ -298,8 +290,15 @@ export function createDiscordDraftPreviewController(params: {
       const progressLine: string | ChannelProgressDraftLine =
         typeof line === "object" && line !== undefined ? line : normalized;
       if (discordStreamMode === "partial") {
-        // camus: keep tool calls in the chronological timeline.
+        // camus: every tool start is also a natural assistant-block boundary,
+        // so commit the active text into the timeline regardless of whether
+        // we render the tool line itself. This is what gives the user
+        // properly separated text segments around tool calls.
         camusCommitActiveText();
+        if (!camusShowToolProgress) {
+          camusUpdateStream();
+          return;
+        }
         const key = camusToolKey(progressLine);
         const last = camusTimeline[camusTimeline.length - 1];
         if (last && last.kind === "tool" && last.key === key) {
@@ -448,11 +447,10 @@ export function createDiscordDraftPreviewController(params: {
       previewToolProgressLines = [];
       hasStreamedMessage = true;
       if (discordStreamMode === "partial") {
-        // camus: track the in-progress assistant block, comparing against the
-        // raw runtime text (without our injected breaks) so subsequent partials
-        // still match for extension detection. Inject paragraph breaks for
-        // adjacent `**` block boundaries — claude-cli concatenates message
-        // blocks without separators, so we restore them on the way out.
+        // camus: track cumulative runtime text in `camusRawActive`. Peel
+        // active block text off as `cleaned.slice(committedLen)` so prior
+        // blocks already committed to the timeline (via boundary/tool events)
+        // are not duplicated in the active region.
         if (
           camusRawActive &&
           camusRawActive.startsWith(cleaned) &&
@@ -460,8 +458,13 @@ export function createDiscordDraftPreviewController(params: {
         ) {
           return;
         }
+        if (cleaned.length < camusCommittedLen) {
+          // Runtime sent a shorter snapshot than what we already committed; this
+          // means the cumulative text restarted (new turn / resume). Reset.
+          camusCommittedLen = 0;
+        }
         camusRawActive = cleaned;
-        camusActiveText = camusInjectBoundaries(cleaned);
+        camusActiveText = cleaned.slice(camusCommittedLen);
         camusUpdateStream();
         return;
       }

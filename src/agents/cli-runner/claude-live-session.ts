@@ -759,6 +759,9 @@ function createTurn(params: {
   context: PreparedCliRunContext;
   noOutputTimeoutMs: number;
   onAssistantDelta: (delta: CliStreamingDelta) => void;
+  onAssistantMessage?: () => void;
+  onToolUse?: (info: { name: string; toolCallId: string; args?: Record<string, unknown> }) => void;
+  onToolResult?: (info: { toolCallId: string; isError?: boolean }) => void;
   session: ClaudeLiveSession;
   resolve: (output: CliOutput) => void;
   reject: (error: unknown) => void;
@@ -775,6 +778,9 @@ function createTurn(params: {
       backend: params.context.preparedBackend.backend,
       providerId: params.context.backendResolved.id,
       onAssistantDelta: params.onAssistantDelta,
+      onAssistantMessage: params.onAssistantMessage,
+      onToolUse: params.onToolUse,
+      onToolResult: params.onToolResult,
     }),
     resolve: params.resolve,
     reject: params.reject,
@@ -840,6 +846,9 @@ export async function runClaudeLiveSessionTurn(params: {
   noOutputTimeoutMs: number;
   getProcessSupervisor: () => ProcessSupervisor;
   onAssistantDelta: (delta: CliStreamingDelta) => void;
+  onAssistantMessage?: () => void;
+  onToolUse?: (info: { name: string; toolCallId: string; args?: Record<string, unknown> }) => void;
+  onToolResult?: (info: { toolCallId: string; isError?: boolean }) => void;
   cleanup: () => Promise<void>;
 }): Promise<ClaudeLiveRunResult> {
   const key = buildClaudeLiveKey(params.context);
@@ -951,6 +960,9 @@ export async function runClaudeLiveSessionTurn(params: {
       context: params.context,
       noOutputTimeoutMs: params.noOutputTimeoutMs,
       onAssistantDelta: params.onAssistantDelta,
+      onAssistantMessage: params.onAssistantMessage,
+      onToolUse: params.onToolUse,
+      onToolResult: params.onToolResult,
       session: liveSession,
       resolve,
       reject,

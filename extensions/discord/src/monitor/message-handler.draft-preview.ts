@@ -93,6 +93,31 @@ export function createDiscordDraftPreviewController(params: {
   type CamusSegment = CamusTextSegment | CamusToolSegment;
   const camusTimeline: CamusSegment[] = [];
   let camusActiveText = "";
+  // Raw cumulative text from the runtime, without injected paragraph breaks.
+  // Used to detect when the next partial extends the prior content vs. replaces it.
+  let camusRawActive = "";
+
+  // Inject `\n\n` between adjacent bold-marker block boundaries in cumulative
+  // text from claude-cli (which concatenates message blocks without separators).
+  // Skips inline code and fenced code blocks so literal `**` content is preserved.
+  const camusInjectBoundaries = (text: string): string => {
+    if (!text) return text;
+    const parts: string[] = [];
+    const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
+    let last = 0;
+    let match: RegExpExecArray | null;
+    const splitOutside = (segment: string): string =>
+      segment
+        .replace(/\*\*\*\*/g, "**\n\n**")
+        .replace(/(?<=[^\s*\n])\*\*(?=[^*\s\n])/g, "\n\n**");
+    while ((match = codeRe.exec(text)) !== null) {
+      parts.push(splitOutside(text.slice(last, match.index)));
+      parts.push(match[0]);
+      last = match.index + match[0].length;
+    }
+    parts.push(splitOutside(text.slice(last)));
+    return parts.join("");
+  };
 
   const camusToolKey = (line: string | ChannelProgressDraftLine): string => {
     if (typeof line === "string") return `string:${line}`;
@@ -106,10 +131,12 @@ export function createDiscordDraftPreviewController(params: {
   const camusCommitActiveText = () => {
     if (camusActiveText.trim().length === 0) {
       camusActiveText = "";
+      camusRawActive = "";
       return;
     }
     camusTimeline.push({ kind: "text", text: camusActiveText });
     camusActiveText = "";
+    camusRawActive = "";
   };
 
   const camusFormatToolLine = (line: string | ChannelProgressDraftLine): string => {
@@ -155,6 +182,7 @@ export function createDiscordDraftPreviewController(params: {
   const camusResetTimeline = () => {
     camusTimeline.length = 0;
     camusActiveText = "";
+    camusRawActive = "";
   };
   // ── /camus ──────────────────────────────────────────────────────────────────
   const previewToolProgressEnabled =
@@ -358,14 +386,17 @@ export function createDiscordDraftPreviewController(params: {
       }
     },
     resolvePreviewFinalText(text?: string) {
-      if (typeof text !== "string") {
-        return undefined;
-      }
       if (discordStreamMode === "partial") {
-        // camus: the timeline IS the final message — don't replace it.
-        // Commit any trailing active text so the sealed preview is complete.
+        // camus: the streamed timeline IS the final message. Commit any
+        // trailing active text, then return the rendered body so the caller
+        // edits the existing draft instead of falling through to deliverNormally
+        // (which would post a fresh reply containing only the last block of
+        // assistant text from claude-cli, throwing the streamed body away).
         camusCommitActiveText();
         camusUpdateStream();
+        return camusRender() || undefined;
+      }
+      if (typeof text !== "string") {
         return undefined;
       }
       const formatted = convertMarkdownTables(
@@ -417,17 +448,20 @@ export function createDiscordDraftPreviewController(params: {
       previewToolProgressLines = [];
       hasStreamedMessage = true;
       if (discordStreamMode === "partial") {
-        // camus: track the in-progress assistant block in `camusActiveText`
-        // rather than overwriting the whole message. Prior text/tool segments
-        // already in the timeline stay above this active text.
+        // camus: track the in-progress assistant block, comparing against the
+        // raw runtime text (without our injected breaks) so subsequent partials
+        // still match for extension detection. Inject paragraph breaks for
+        // adjacent `**` block boundaries — claude-cli concatenates message
+        // blocks without separators, so we restore them on the way out.
         if (
-          camusActiveText &&
-          camusActiveText.startsWith(cleaned) &&
-          cleaned.length < camusActiveText.length
+          camusRawActive &&
+          camusRawActive.startsWith(cleaned) &&
+          cleaned.length < camusRawActive.length
         ) {
           return;
         }
-        camusActiveText = cleaned;
+        camusRawActive = cleaned;
+        camusActiveText = camusInjectBoundaries(cleaned);
         camusUpdateStream();
         return;
       }

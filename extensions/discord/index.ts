@@ -21,6 +21,6 @@ export default defineBundledChannelEntry({
   },
   registerFull(api) {
     registerDiscordSubagentHooks(api);
-    api.registerMeetingNotesSourceProvider(discordVoiceMeetingNotesSourceProvider);
+    api.registerMeetingNotesSourceProvider?.(discordVoiceMeetingNotesSourceProvider);
   },
 });

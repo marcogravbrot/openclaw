@@ -9,7 +9,9 @@ import {
   type CliStreamingDelta,
 } from "../cli-output.js";
 import { FailoverError, resolveFailoverStatus } from "../failover-error.js";
+import { registerNativeHookRelay } from "../harness/native-hook-relay.js";
 import { classifyFailoverReason } from "../pi-embedded-helpers.js";
+import { prepareClaudeStopHookSettings } from "./claude-stop-hook-settings.js";
 import { cliBackendLog } from "./log.js";
 import type { PreparedCliRunContext } from "./types.js";
 
@@ -176,8 +178,10 @@ export function buildClaudeLiveArgs(params: {
   backend: CliBackendConfig;
   systemPrompt: string;
   useResume: boolean;
+  /** Path to a per-session Claude Code settings file injected via `--settings`. */
+  settingsPath?: string;
 }): string[] {
-  return appendArg(
+  const base = appendArg(
     upsertArgValue(
       upsertArgValue(
         upsertArgValue(
@@ -193,6 +197,7 @@ export function buildClaudeLiveArgs(params: {
     ),
     "--replay-user-messages",
   );
+  return params.settingsPath ? upsertArgValue(base, "--settings", params.settingsPath) : base;
 }
 
 function buildClaudeLiveKey(context: PreparedCliRunContext): string {
@@ -853,6 +858,25 @@ export async function runClaudeLiveSessionTurn(params: {
 }): Promise<ClaudeLiveRunResult> {
   const key = buildClaudeLiveKey(params.context);
   const resumeCapable = Boolean(params.context.preparedBackend.backend.resumeArgs?.length);
+  // Wire the Claude Code Stop hook → OpenClaw native-hook relay so
+  // `before_agent_finalize` plugin hooks (e.g. tmem's missing-tmem_log gate)
+  // can revise / force-stop a turn. Settings file is per-session and stable
+  // across runs; the relay is re-registered each run under the same id.
+  const stopHookSettings = prepareClaudeStopHookSettings({
+    sessionId: params.context.params.sessionId,
+  });
+  registerNativeHookRelay({
+    provider: "claude-cli",
+    relayId: stopHookSettings.relayId,
+    sessionId: params.context.params.sessionId,
+    ...(params.context.params.sessionKey ? { sessionKey: params.context.params.sessionKey } : {}),
+    ...(params.context.params.agentId ? { agentId: params.context.params.agentId } : {}),
+    runId: params.context.params.runId,
+    allowedEvents: ["before_agent_finalize"],
+  });
+  cliBackendLog.info(
+    `claude stop-hook wired: relayId=${stopHookSettings.relayId} settings=${stopHookSettings.settingsPath} runId=${params.context.params.runId} sessionId=${params.context.params.sessionId}`,
+  );
   const argv = [
     params.context.preparedBackend.backend.command,
     ...buildClaudeLiveArgs({
@@ -860,6 +884,7 @@ export async function runClaudeLiveSessionTurn(params: {
       backend: params.context.preparedBackend.backend,
       systemPrompt: params.context.systemPrompt,
       useResume: params.useResume,
+      settingsPath: stopHookSettings.settingsPath,
     }),
   ];
   const fingerprint = buildClaudeLiveFingerprint({

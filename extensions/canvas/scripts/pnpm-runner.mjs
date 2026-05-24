@@ -59,7 +59,11 @@ function escapeForCmdExe(arg) {
 }
 
 function buildCmdExeCommandLine(command, args) {
-  return [escapeForCmdExe(command), ...args.map(escapeForCmdExe)].join(" ");
+  // Outer quotes are required: cmd.exe /d /s /c strips the first and last
+  // quote on the line, so without the wrap a quoted path like
+  // `"C:\Program Files\..."` loses its quotes and cmd splits at the space.
+  const line = [escapeForCmdExe(command), ...args.map(escapeForCmdExe)].join(" ");
+  return `"${line}"`;
 }
 
 function windowsCmdSpec(command, args, comSpec) {

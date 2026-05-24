@@ -182,20 +182,28 @@ export function buildClaudeLiveArgs(params: {
   settingsPath?: string;
 }): string[] {
   const base = appendArg(
-    upsertArgValue(
+    appendArg(
       upsertArgValue(
         upsertArgValue(
-          stripLiveProcessArgs(params.args, params.backend, params.useResume),
-          "--input-format",
+          upsertArgValue(
+            stripLiveProcessArgs(params.args, params.backend, params.useResume),
+            "--input-format",
+            "stream-json",
+          ),
+          "--output-format",
           "stream-json",
         ),
-        "--output-format",
-        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
       ),
-      "--permission-prompt-tool",
-      "stdio",
+      "--replay-user-messages",
     ),
-    "--replay-user-messages",
+    // Surface hook lifecycle events in the stream so the gateway can see
+    // when Claude Code fires Stop/PreToolUse hooks (and whether they
+    // succeed). Without this, hook activity is invisible to us in live
+    // stream-json mode and we can't tell whether `--settings` Stop hooks
+    // are firing per turn or only on session close.
+    "--include-hook-events",
   );
   return params.settingsPath ? upsertArgValue(base, "--settings", params.settingsPath) : base;
 }
@@ -534,6 +542,18 @@ function handleClaudeLiveLine(session: ClaudeLiveSession, line: string): void {
   const parsed = parseClaudeLiveJsonLine(session, trimmed);
   if (!parsed) {
     return;
+  }
+  // Diagnostic: surface Stop/PreToolUse hook activity in the gateway log
+  // so we can see whether `--settings` Stop hooks are firing per turn.
+  // Driven by --include-hook-events; events look like
+  // {type:"system", subtype:"hook_started"|"hook_response", hook_name:..., outcome:...}
+  if (parsed.type === "system" && typeof parsed.subtype === "string" && (parsed.subtype as string).startsWith("hook_")) {
+    const hookName = typeof parsed.hook_name === "string" ? parsed.hook_name : "?";
+    const outcome = typeof parsed.outcome === "string" ? ` outcome=${parsed.outcome}` : "";
+    const exitCode = typeof parsed.exit_code === "number" ? ` exit=${parsed.exit_code}` : "";
+    cliBackendLog.info(
+      `claude hook event: subtype=${parsed.subtype} hook=${hookName}${outcome}${exitCode}`,
+    );
   }
   if (session.drainingAbortedTurn) {
     if (parsed.type === "result") {

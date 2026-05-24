@@ -1187,7 +1187,11 @@ export async function runEmbeddedAttempt(
   log.debug(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
-  const prepStages = createEmbeddedRunStageTracker();
+  // syncBreadcrumbTag enables `process.stderr.write` per mark — required to
+  // diagnose stalls where sync CPU work has starved the event loop (async
+  // timers and log subsystems are pinned waiting for the loop). The
+  // breadcrumb writes are sync in Node when stderr is a terminal or pipe.
+  const prepStages = createEmbeddedRunStageTracker({ syncBreadcrumbTag: params.runId });
   // Watchdog: when a run takes >30s to reach stream-ready, emit the partial
   // prep-stage summary every 30s so operators can see WHICH stage is stuck.
   // Without this, stalls before stream-ready are invisible (the regular

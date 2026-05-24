@@ -26,23 +26,40 @@ const EMBEDDED_RUN_STAGE_WARN_STAGE_MS = 5_000;
 
 export function createEmbeddedRunStageTracker(options?: {
   now?: () => number;
+  /**
+   * Optional tag (typically runId) for synchronous stderr breadcrumbs.
+   * When set, each `mark()` writes one line directly to process.stderr,
+   * which is synchronous in Node when stderr is a terminal or pipe. This
+   * bypasses the event loop so stage transitions remain visible even when
+   * sync CPU work has starved the loop (which kills async timers and
+   * log-subsystem flushes).
+   */
+  syncBreadcrumbTag?: string;
 }): EmbeddedRunStageTracker {
   const now = options?.now ?? Date.now;
   const startedAt = now();
   let previousAt = startedAt;
   const stages: EmbeddedRunStageTiming[] = [];
+  const breadcrumbTag = options?.syncBreadcrumbTag;
 
   const toMs = (value: number) => Math.max(0, Math.round(value));
 
   return {
     mark(name) {
       const currentAt = now();
-      stages.push({
-        name,
-        durationMs: toMs(currentAt - previousAt),
-        elapsedMs: toMs(currentAt - startedAt),
-      });
+      const durationMs = toMs(currentAt - previousAt);
+      const elapsedMs = toMs(currentAt - startedAt);
+      stages.push({ name, durationMs, elapsedMs });
       previousAt = currentAt;
+      if (breadcrumbTag) {
+        try {
+          process.stderr.write(
+            `[prep-breadcrumb] ${new Date(currentAt).toISOString()} run=${breadcrumbTag} stage=${name} stageDurMs=${durationMs} totalElapsedMs=${elapsedMs}\n`,
+          );
+        } catch {
+          // never let diagnostics crash the run
+        }
+      }
     },
     snapshot() {
       return {

@@ -144,3 +144,7 @@ export {
 } from "../context-engine/delegate.js";
 export { onDiagnosticEvent } from "../infra/diagnostic-events.js";
 export { optionalStringEnum, stringEnum } from "../agents/schema/typebox.js";
+export {
+  getCurrentPluginToolRunContext,
+  type PluginToolRunContext,
+} from "../plugins/tool-run-context.js";

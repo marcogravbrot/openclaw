@@ -16,6 +16,7 @@ import {
 import { sanitizeForConsole } from "./console-sanitize.js";
 import type { ClientToolDefinition } from "./pi-embedded-runner/run/params.js";
 import type { HookContext } from "./pi-tools.before-tool-call.js";
+import { runWithPluginToolRunContext } from "../plugins/tool-run-context.js";
 import {
   buildBlockedToolResult,
   isToolWrappedWithBeforeToolCallHook,
@@ -361,7 +362,24 @@ export function toToolDefinitions(
             });
             recordAdjustedParamsForToolCall(toolCallId, executeParams, hookContext?.runId);
           }
-          const rawResult = await tool.execute(toolCallId, executeParams, signal, onUpdate);
+          // Bind the live run context as AsyncLocalStorage during execute so
+          // plugin-owned tools can read it via `getCurrentPluginToolRunContext`
+          // instead of relying on identity ferried through the prompt and tool
+          // params. The agent-tool execute signature has no ctx slot so this
+          // is the least-invasive way to propagate runId/sessionId/etc.
+          const rawResult = await runWithPluginToolRunContext(
+            hookContext
+              ? {
+                  ...(hookContext.agentId ? { agentId: hookContext.agentId } : {}),
+                  ...(hookContext.sessionId ? { sessionId: hookContext.sessionId } : {}),
+                  ...(hookContext.sessionKey ? { sessionKey: hookContext.sessionKey } : {}),
+                  ...(hookContext.runId ? { runId: hookContext.runId } : {}),
+                  ...(hookContext.channelId ? { channelId: hookContext.channelId } : {}),
+                  ...(hookContext.workspaceDir ? { workspaceDir: hookContext.workspaceDir } : {}),
+                }
+              : undefined,
+            () => tool.execute(toolCallId, executeParams, signal, onUpdate),
+          );
           const result = normalizeToolExecutionResult({
             toolName: normalizedName,
             result: rawResult,

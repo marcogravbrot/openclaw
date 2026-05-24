@@ -288,7 +288,7 @@ export function createDiscordDraftPreviewController(params: {
     },
     async pushToolProgress(
       line?: string | ChannelProgressDraftLine,
-      options?: { toolName?: string },
+      options?: { toolName?: string; toolCallId?: string },
     ) {
       if (!draftStream) {
         return;
@@ -321,7 +321,12 @@ export function createDiscordDraftPreviewController(params: {
           camusUpdateStream();
           return;
         }
-        const key = camusToolKey(progressLine);
+        // Dedup by per-invocation toolCallId when provided (so progress updates
+        // for the SAME call replace the prior render) and fall back to the
+        // rendered text otherwise. Using the text alone collapses distinct
+        // calls that the plugin-sdk happens to format identically (e.g. two
+        // `echo` commands both rendered as "🛠️ print text").
+        const key = options?.toolCallId ? `id:${options.toolCallId}` : camusToolKey(progressLine);
         const last = camusTimeline[camusTimeline.length - 1];
         if (last && last.kind === "tool" && last.key === key) {
           last.line = progressLine;

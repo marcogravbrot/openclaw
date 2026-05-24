@@ -1761,12 +1761,14 @@ export async function runAgentTurnWithFallback(params: {
                   evt.data.args && typeof evt.data.args === "object"
                     ? (evt.data.args as Record<string, unknown>)
                     : undefined;
+                const toolCallId = readStringValue(evt.data.toolCallId);
                 await Promise.all([
                   params.typingSignals.signalToolStart(),
                   params.opts?.onToolStart?.({
                     name,
                     phase,
                     args,
+                    toolCallId,
                     detailMode: params.toolProgressDetail,
                   }),
                 ]);
@@ -2013,6 +2015,7 @@ export async function runAgentTurnWithFallback(params: {
                         name,
                         phase,
                         args,
+                        toolCallId: toolCallId || undefined,
                         detailMode: params.toolProgressDetail,
                       });
                       await Promise.all([

@@ -852,7 +852,7 @@ export async function processDiscordMessage(
                   },
                   payload.detailMode ? { detailMode: payload.detailMode } : undefined,
                 ),
-                { toolName: payload.name },
+                { toolName: payload.name, toolCallId: payload.toolCallId },
               );
             },
             onItemEvent: async (payload) => {

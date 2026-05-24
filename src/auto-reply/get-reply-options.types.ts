@@ -105,6 +105,10 @@ export type GetReplyOptions = {
     name?: string;
     phase?: string;
     args?: Record<string, unknown>;
+    /** Unique per-invocation identifier from the underlying runtime (Anthropic
+     * tool_use id, etc.). Channel plugins should use this for de-duplication
+     * across progress updates instead of pattern-matching on the rendered text. */
+    toolCallId?: string;
     detailMode?: "explain" | "raw";
   }) => Promise<void> | void;
   /** Called when a concrete work item starts, updates, or completes. */

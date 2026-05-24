@@ -147,13 +147,27 @@ export function createDiscordDraftPreviewController(params: {
   };
 
   const camusRender = (): string => {
-    const parts: string[] = [];
-    for (const seg of camusTimeline) {
-      if (seg.kind === "text") parts.push(seg.text);
-      else parts.push(camusFormatToolLine(seg.line));
+    // Render segments in order. Adjacent tool segments are joined with a
+    // single newline so a burst of back-to-back tool calls renders tight;
+    // text↔tool and text↔text transitions use a blank line (\n\n).
+    const renderedSegs = camusTimeline.map((seg) =>
+      seg.kind === "text"
+        ? { kind: "text" as const, text: seg.text }
+        : { kind: "tool" as const, text: camusFormatToolLine(seg.line) },
+    );
+    if (camusActiveText) {
+      renderedSegs.push({ kind: "text", text: camusActiveText });
     }
-    if (camusActiveText) parts.push(camusActiveText);
-    return parts.join("\n\n");
+    let out = "";
+    for (let i = 0; i < renderedSegs.length; i += 1) {
+      const seg = renderedSegs[i];
+      if (i > 0) {
+        const prev = renderedSegs[i - 1];
+        out += prev.kind === "tool" && seg.kind === "tool" ? "\n" : "\n\n";
+      }
+      out += seg.text;
+    }
+    return out;
   };
 
   const camusUpdateStream = () => {
@@ -458,7 +472,10 @@ export function createDiscordDraftPreviewController(params: {
         // camus: track cumulative runtime text in `camusRawActive`. Peel
         // active block text off as `cleaned.slice(committedLen)` so prior
         // blocks already committed to the timeline (via boundary/tool events)
-        // are not duplicated in the active region.
+        // are not duplicated in the active region. Trim leading whitespace
+        // from the peel — claude-cli's cumulative snapshots often include
+        // `\n\n` between message blocks, which would compound with the
+        // join-separator in camusRender to produce two blank lines.
         if (
           camusRawActive &&
           camusRawActive.startsWith(cleaned) &&
@@ -472,7 +489,7 @@ export function createDiscordDraftPreviewController(params: {
           camusCommittedLen = 0;
         }
         camusRawActive = cleaned;
-        camusActiveText = cleaned.slice(camusCommittedLen);
+        camusActiveText = cleaned.slice(camusCommittedLen).replace(/^\s+/, "");
         camusUpdateStream();
         return;
       }

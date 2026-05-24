@@ -1188,7 +1188,31 @@ export async function runEmbeddedAttempt(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
   const prepStages = createEmbeddedRunStageTracker();
+  // Watchdog: when a run takes >30s to reach stream-ready, emit the partial
+  // prep-stage summary every 30s so operators can see WHICH stage is stuck.
+  // Without this, stalls before stream-ready are invisible (the regular
+  // emit only fires at stream-ready) — the gateway's only signal is the
+  // `embedded_run:started` diagnostic with no progress for minutes.
+  let prepWatchdogReachedStreamReady = false;
+  const PREP_WATCHDOG_INTERVAL_MS = 30_000;
+  const prepWatchdog = setInterval(() => {
+    if (prepWatchdogReachedStreamReady) {
+      return;
+    }
+    const summary = prepStages.snapshot();
+    log.warn(
+      formatEmbeddedRunStageSummary(
+        `[trace:embedded-run] prep stages WATCHDOG (still in prep): runId=${params.runId} sessionId=${params.sessionId} elapsedMs=${summary.totalMs}`,
+        summary,
+      ),
+    );
+  }, PREP_WATCHDOG_INTERVAL_MS);
+  prepWatchdog.unref?.();
   const emitPrepStageSummary = (phase: string) => {
+    if (phase === "stream-ready") {
+      prepWatchdogReachedStreamReady = true;
+      clearInterval(prepWatchdog);
+    }
     const summary = prepStages.snapshot();
     const shouldWarn = shouldWarnEmbeddedRunStageSummary(summary);
     if (!shouldWarn && !log.isEnabled("trace")) {
@@ -5013,6 +5037,7 @@ export async function runEmbeddedAttempt(
       promptError ?? new Error("run exited before diagnostic completion"),
     );
     restoreSkillEnv?.();
+    clearInterval(prepWatchdog);
   }
 }
 export { testing as __testing };

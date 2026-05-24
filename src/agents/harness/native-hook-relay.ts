@@ -37,7 +37,7 @@ const NATIVE_HOOK_RELAY_EVENTS = [
   "before_agent_finalize",
 ] as const;
 
-const NATIVE_HOOK_RELAY_PROVIDERS = ["codex"] as const;
+const NATIVE_HOOK_RELAY_PROVIDERS = ["codex", "claude-cli"] as const;
 
 export type NativeHookRelayEvent = (typeof NATIVE_HOOK_RELAY_EVENTS)[number];
 export type NativeHookRelayProvider = (typeof NATIVE_HOOK_RELAY_PROVIDERS)[number];
@@ -239,62 +239,76 @@ const NATIVE_HOOK_TOOL_NAME_ALIASES: Record<string, string> = {
   exec_command: "exec",
 };
 
+const codexNativeHookRelayProviderAdapter: NativeHookRelayProviderAdapter = {
+  normalizeMetadata: normalizeCodexHookMetadata,
+  readToolInput: readCodexToolInput,
+  readToolResponse: readCodexToolResponse,
+  renderNoopResponse: () => {
+    // Codex treats empty stdout plus exit 0 as no decision/no additional context.
+    return { stdout: "", stderr: "", exitCode: 0 };
+  },
+  renderPreToolUseBlockResponse: (reason) => ({
+    stdout: `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    })}\n`,
+    stderr: "",
+    exitCode: 0,
+  }),
+  renderBeforeAgentFinalizeReviseResponse: (reason) => ({
+    stdout: `${JSON.stringify({
+      decision: "block",
+      reason,
+    })}\n`,
+    stderr: "",
+    exitCode: 0,
+  }),
+  renderBeforeAgentFinalizeStopResponse: (reason) => ({
+    stdout: `${JSON.stringify({
+      continue: false,
+      ...(reason?.trim() ? { stopReason: reason.trim() } : {}),
+    })}\n`,
+    stderr: "",
+    exitCode: 0,
+  }),
+  renderPermissionDecisionResponse: (decision, message) => ({
+    stdout: `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision:
+          decision === "allow"
+            ? { behavior: "allow" }
+            : {
+                behavior: "deny",
+                message: message?.trim() || "Denied by OpenClaw",
+              },
+      },
+    })}\n`,
+    stderr: "",
+    exitCode: 0,
+  }),
+};
+
+// Claude Code's Stop hook payload mirrors Codex's hook envelope (same
+// snake_case keys: hook_event_name, stop_hook_active, transcript_path, cwd,
+// session_id), and Claude Code's Stop-hook response protocol uses the same
+// `{decision:"block", reason}` shape to force a continuation pass with our
+// instruction, and `{continue:false, stopReason}` to halt. We therefore reuse
+// the codex adapter implementations end-to-end. If Claude Code's protocol
+// diverges in a future version, split the adapter then; today reusing keeps
+// the two backends in lockstep and avoids accidental drift.
+const claudeCliNativeHookRelayProviderAdapter: NativeHookRelayProviderAdapter =
+  codexNativeHookRelayProviderAdapter;
+
 const nativeHookRelayProviderAdapters: Record<
   NativeHookRelayProvider,
   NativeHookRelayProviderAdapter
 > = {
-  codex: {
-    normalizeMetadata: normalizeCodexHookMetadata,
-    readToolInput: readCodexToolInput,
-    readToolResponse: readCodexToolResponse,
-    renderNoopResponse: () => {
-      // Codex treats empty stdout plus exit 0 as no decision/no additional context.
-      return { stdout: "", stderr: "", exitCode: 0 };
-    },
-    renderPreToolUseBlockResponse: (reason) => ({
-      stdout: `${JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: reason,
-        },
-      })}\n`,
-      stderr: "",
-      exitCode: 0,
-    }),
-    renderBeforeAgentFinalizeReviseResponse: (reason) => ({
-      stdout: `${JSON.stringify({
-        decision: "block",
-        reason,
-      })}\n`,
-      stderr: "",
-      exitCode: 0,
-    }),
-    renderBeforeAgentFinalizeStopResponse: (reason) => ({
-      stdout: `${JSON.stringify({
-        continue: false,
-        ...(reason?.trim() ? { stopReason: reason.trim() } : {}),
-      })}\n`,
-      stderr: "",
-      exitCode: 0,
-    }),
-    renderPermissionDecisionResponse: (decision, message) => ({
-      stdout: `${JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision:
-            decision === "allow"
-              ? { behavior: "allow" }
-              : {
-                  behavior: "deny",
-                  message: message?.trim() || "Denied by OpenClaw",
-                },
-        },
-      })}\n`,
-      stderr: "",
-      exitCode: 0,
-    }),
-  },
+  codex: codexNativeHookRelayProviderAdapter,
+  "claude-cli": claudeCliNativeHookRelayProviderAdapter,
 };
 
 export function registerNativeHookRelay(
@@ -1637,6 +1651,9 @@ function nativeHookRelayProviderDisplayName(provider: NativeHookRelayProvider): 
   if (provider === "codex") {
     return "Codex";
   }
+  if (provider === "claude-cli") {
+    return "Claude Code";
+  }
   return provider;
 }
 
@@ -1708,7 +1725,7 @@ function shellQuoteArg(value: string, platform: NodeJS.Platform): string {
 }
 
 function readNativeHookRelayProvider(value: unknown): NativeHookRelayProvider {
-  if (value === "codex") {
+  if (value === "codex" || value === "claude-cli") {
     return value;
   }
   throw new Error("unsupported native hook relay provider");

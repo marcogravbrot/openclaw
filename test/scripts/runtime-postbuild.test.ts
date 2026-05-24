@@ -373,6 +373,37 @@ describe("runtime postbuild static assets", () => {
     );
   });
 
+  it("keeps the stable alias on a postbuild rerun when legacy compat aliases share the base name", async () => {
+    // Regression: writeLegacyRootRuntimeCompatAliases drops files like
+    // `runtime-plugins.runtime-CNAfmQRG.js` that re-export `./runtime-plugins.runtime.js`.
+    // A second postbuild run used to count those as extra candidates and, with no
+    // wrapper match, delete the stable alias the compat shims depend on.
+    const rootDir = createTempDir("openclaw-runtime-postbuild-");
+    const distDir = path.join(rootDir, "dist");
+    await fs.mkdir(distDir, { recursive: true });
+    await fs.writeFile(
+      path.join(distDir, "runtime-plugins.runtime-Impl123.js"),
+      "export const ready = true;\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(distDir, "runtime-plugins.runtime-Legacy1.js"),
+      'export * from "./runtime-plugins.runtime.js";\n',
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(distDir, "runtime-plugins.runtime-Legacy2.js"),
+      'export * from "./runtime-plugins.runtime.js";\n',
+      "utf8",
+    );
+
+    writeStableRootRuntimeAliases({ rootDir });
+
+    expect(await fs.readFile(path.join(distDir, "runtime-plugins.runtime.js"), "utf8")).toBe(
+      'export * from "./runtime-plugins.runtime-Impl123.js";\n',
+    );
+  });
+
   it("keeps stable aliases when one colliding root runtime chunk re-exports the implementation", async () => {
     const rootDir = createTempDir("openclaw-runtime-postbuild-");
     const distDir = path.join(rootDir, "dist");

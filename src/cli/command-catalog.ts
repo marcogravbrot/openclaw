@@ -278,6 +278,22 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
   },
   { commandPath: ["exec-policy"], policy: { networkProxy: "bypass" } },
   { commandPath: ["hooks"], policy: { networkProxy: "bypass" } },
+  {
+    // `hooks relay` is invoked by native harness Stop/Pre/PostTool hooks. The
+    // host (Claude Code, codex) parses ONLY the JSON we print on stdout to
+    // decide block/allow/revise. Any decorative output from the CLI bootstrap
+    // (banner, "Config warnings" boxes, doctor preflight) appears before the
+    // JSON, breaks the parse, and the hook silently no-ops.
+    commandPath: ["hooks", "relay"],
+    exact: true,
+    policy: {
+      bypassConfigGuard: true,
+      hideBanner: true,
+      loadPlugins: "never",
+      ensureCliPath: false,
+      networkProxy: "bypass",
+    },
+  },
   { commandPath: ["logs"], policy: { networkProxy: "bypass" } },
   { commandPath: ["mcp"], policy: { networkProxy: "bypass" } },
   {

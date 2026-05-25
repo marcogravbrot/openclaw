@@ -15,7 +15,6 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   convertMarkdownTables,
   stripInlineDirectiveTagsForDelivery,
-  stripInternalRuntimeScaffolding,
   stripReasoningTagsFromText,
 } from "openclaw/plugin-sdk/text-chunking";
 import { chunkDiscordTextWithMode } from "../chunk.js";
@@ -519,13 +518,8 @@ export function createDiscordDraftPreviewController(params: {
       if (!draftStream || !text) {
         return;
       }
-      // Strip runtime scaffolding (<system-reminder>, <previous_response>, …) BEFORE
-      // any other processing. Some runtimes (notably claude-cli) echo injected
-      // system reminders back inside the assistant cumulative text — without
-      // this strip they would leak into the visible Discord preview.
-      const sanitized = stripInternalRuntimeScaffolding(text);
       const cleaned = stripInlineDirectiveTagsForDelivery(
-        stripReasoningTagsFromText(sanitized, { mode: "strict", trim: "both" }),
+        stripReasoningTagsFromText(text, { mode: "strict", trim: "both" }),
       ).text;
       if (!cleaned || cleaned.startsWith("Reasoning:\n")) {
         return;

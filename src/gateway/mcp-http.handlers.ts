@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { runBeforeToolCallHook, type HookContext } from "../agents/pi-tools.before-tool-call.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { withPluginToolRunContext } from "../plugins/runtime/tool-run-context.js";
+import { runWithPluginToolRunContext } from "../plugins/tool-run-context.js";
 import {
   MCP_LOOPBACK_SERVER_NAME,
   MCP_LOOPBACK_SERVER_VERSION,
@@ -87,7 +87,7 @@ export async function handleMcpJsonRpc(params: {
             isError: true,
           });
         }
-        const result = await withPluginToolRunContext(
+        const result = await runWithPluginToolRunContext(
           {
             runId: params.hookContext?.runId,
             sessionId: params.hookContext?.sessionId,

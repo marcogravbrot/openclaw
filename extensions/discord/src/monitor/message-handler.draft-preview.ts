@@ -548,7 +548,21 @@ export function createDiscordDraftPreviewController(params: {
         ) {
           return;
         }
-        if (cleaned.length < camusCommittedLen) {
+        // Detect a cumulative restart (e.g. a stop-hook re-prompt mid-turn,
+        // where the runtime begins a fresh assistant message with different
+        // content). If the new cleaned text neither extends the prior raw
+        // cumulative nor is a prefix of it, commit the prior active text to
+        // the timeline so the new text appends below as its own block — not
+        // replacing what was already shown.
+        const cumulativeRestarted =
+          camusRawActive &&
+          !cleaned.startsWith(camusRawActive) &&
+          !camusRawActive.startsWith(cleaned);
+        if (cumulativeRestarted) {
+          camusCommitActiveText();
+          camusCommittedLen = 0;
+          camusRawActive = "";
+        } else if (cleaned.length < camusCommittedLen) {
           // Runtime sent a shorter snapshot than what we already committed; this
           // means the cumulative text restarted (new turn / resume). Reset.
           camusCommittedLen = 0;

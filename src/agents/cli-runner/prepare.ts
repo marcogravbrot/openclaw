@@ -238,6 +238,8 @@ export async function prepareCliRunContext(
           OPENCLAW_MCP_SESSION_KEY: params.sessionKey ?? "",
           OPENCLAW_MCP_MESSAGE_CHANNEL: params.messageChannel ?? params.messageProvider ?? "",
           OPENCLAW_MCP_INBOUND_EVENT_KIND: params.currentInboundEventKind ?? "",
+          OPENCLAW_MCP_RUN_ID: params.runId ?? "",
+          OPENCLAW_MCP_SESSION_ID: params.sessionId ?? "",
         }
       : undefined,
     warn: (message) => cliBackendLog.warn(message),

@@ -134,6 +134,13 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
               agentId: scopedTools.agentId,
               config: cfg,
               sessionKey: requestContext.sessionKey,
+              runId: requestContext.runId,
+              sessionId: requestContext.sessionId,
+              // messageProvider is the provider name ("discord", "slack", …);
+              // the real channel id lives encoded in sessionKey (e.g.
+              // "agent:main:discord:channel:1506740347173339176"). Plugins
+              // that need a channel id derive it from sessionKey.
+              messageProvider: requestContext.messageProvider,
             },
             signal: requestAbort.signal,
           });

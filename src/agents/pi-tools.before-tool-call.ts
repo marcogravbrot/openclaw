@@ -78,6 +78,8 @@ export type HookContext = {
   runId?: string;
   trace?: DiagnosticTraceContext;
   channelId?: string;
+  /** Inbound message provider name (e.g. "discord"). Channel id is encoded in sessionKey. */
+  messageProvider?: string;
   loopDetection?: ToolLoopDetectionConfig;
   onToolOutcome?: ToolOutcomeObserver;
   skillsSnapshot?: SkillSnapshot;

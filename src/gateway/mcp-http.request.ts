@@ -32,6 +32,8 @@ type McpRequestContext = {
   accountId: string | undefined;
   inboundEventKind: InboundEventKind | undefined;
   senderIsOwner: boolean | undefined;
+  runId: string | undefined;
+  sessionId: string | undefined;
 };
 
 function resolveScopedSessionKey(cfg: OpenClawConfig, rawSessionKey: string | undefined): string {
@@ -182,5 +184,7 @@ export function resolveMcpRequestContext(
     accountId: normalizeOptionalString(getHeader(req, "x-openclaw-account-id")),
     inboundEventKind: normalizeMcpInboundEventKind(getHeader(req, "x-openclaw-inbound-event-kind")),
     senderIsOwner: auth.senderIsOwner,
+    runId: normalizeOptionalString(getHeader(req, "x-openclaw-run-id")),
+    sessionId: normalizeOptionalString(getHeader(req, "x-openclaw-session-id")),
   };
 }

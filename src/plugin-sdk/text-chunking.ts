@@ -54,6 +54,7 @@ export {
 export { stripMarkdown } from "../shared/text/strip-markdown.js";
 export { sanitizeTerminalText } from "../terminal/safe-text.js";
 export { SYSTEM_MARK, hasSystemMark, prefixSystemMessage } from "../infra/system-message.ts";
+export { stripInternalRuntimeScaffolding } from "../infra/outbound/sanitize-text.js";
 export {
   stripInlineDirectiveTagsForDelivery,
   stripInlineDirectiveTagsForDisplay,

@@ -15,6 +15,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   convertMarkdownTables,
   stripInlineDirectiveTagsForDelivery,
+  stripInternalRuntimeScaffolding,
   stripReasoningTagsFromText,
 } from "openclaw/plugin-sdk/text-chunking";
 import { chunkDiscordTextWithMode } from "../chunk.js";
@@ -113,8 +114,7 @@ export function createDiscordDraftPreviewController(params: {
     if (typeof line === "string") return `string:${line}`;
     const name = line.toolName ?? "tool";
     const kind = line.kind ?? "";
-    const detail =
-      typeof line.detail === "string" ? line.detail.slice(0, 40) : "";
+    const detail = typeof line.detail === "string" ? line.detail.slice(0, 40) : "";
     return `${name}|${kind}|${detail}`;
   };
 
@@ -146,7 +146,7 @@ export function createDiscordDraftPreviewController(params: {
     return `> 🔧 \`${name}\`${status}${detail}`;
   };
 
-  const camusRender = (): string => {
+  const camusRenderSegments = (includeActive: boolean): string => {
     // Render segments in order. Adjacent tool segments are joined with a
     // single newline so a burst of back-to-back tool calls renders tight;
     // text↔tool and text↔text transitions use a blank line (\n\n).
@@ -155,7 +155,7 @@ export function createDiscordDraftPreviewController(params: {
         ? { kind: "text" as const, text: seg.text }
         : { kind: "tool" as const, text: camusFormatToolLine(seg.line) },
     );
-    if (camusActiveText) {
+    if (includeActive && camusActiveText) {
       renderedSegs.push({ kind: "text", text: camusActiveText });
     }
     let out = "";
@@ -170,20 +170,81 @@ export function createDiscordDraftPreviewController(params: {
     return out;
   };
 
+  const camusRender = (): string => camusRenderSegments(true);
+
+  // Pick a natural split point in `text` at or before `maxLen` chars. Prefers
+  // paragraph break, then line break, then sentence end, then word boundary.
+  // Falls back to a hard cut at `maxLen` only when no break is reasonably near.
+  const camusFindSplitPoint = (text: string, maxLen: number): number => {
+    if (text.length <= maxLen) return text.length;
+    const window = text.slice(0, maxLen);
+    const minAcceptable = Math.floor(maxLen * 0.5);
+    const paragraph = window.lastIndexOf("\n\n");
+    if (paragraph >= minAcceptable) return paragraph + 2;
+    const newline = window.lastIndexOf("\n");
+    if (newline >= minAcceptable) return newline + 1;
+    const sentence = Math.max(
+      window.lastIndexOf(". "),
+      window.lastIndexOf("! "),
+      window.lastIndexOf("? "),
+    );
+    if (sentence >= minAcceptable) return sentence + 2;
+    const space = window.lastIndexOf(" ");
+    if (space >= minAcceptable) return space + 1;
+    return maxLen;
+  };
+
   const camusUpdateStream = () => {
     if (!draftStream) return;
     let body = camusRender();
     if (!body) return;
     if (body.length > draftMaxChars) {
-      // Seal what we have into a separate Discord message and restart the
-      // timeline with the latest active content only.
+      // Body would overflow the 2000-char Discord message cap. Roll over to a
+      // new message at a natural boundary:
+      //   1. Compute timeline-only rendering (segments already committed).
+      //   2. See how much of `camusActiveText` still fits after the timeline.
+      //   3. Final-update the current message with `timeline + head`.
+      //   4. Force a new Discord message starting from `tail` (the unsent
+      //      portion of activeText), so its content does NOT duplicate what is
+      //      already in the previous message.
+      //   5. Advance `camusCommittedLen` past the head so subsequent partials
+      //      peel only NEW text from the runtime cumulative.
+      const timelineBody = camusRenderSegments(false);
+      const sep = timelineBody ? "\n\n" : "";
+      const roomForActive = draftMaxChars - timelineBody.length - sep.length;
+      let firstBody: string;
+      let carryOver: string;
+      if (roomForActive <= 0) {
+        // Timeline alone fills the message. Truncate timeline; keep activeText
+        // for the next message.
+        firstBody = timelineBody.slice(0, draftMaxChars);
+        carryOver = camusActiveText;
+      } else if (camusActiveText.length <= roomForActive) {
+        // Shouldn't normally happen (we only entered this branch because body
+        // > draftMaxChars), but be defensive: hard-cut the body.
+        firstBody = body.slice(0, draftMaxChars);
+        carryOver = body.slice(draftMaxChars);
+      } else {
+        const splitAt = camusFindSplitPoint(camusActiveText, roomForActive);
+        const head = camusActiveText.slice(0, splitAt).trimEnd();
+        carryOver = camusActiveText.slice(splitAt).replace(/^\s+/, "");
+        firstBody = timelineBody + sep + head;
+      }
       params.log(
-        `discord(camus): timeline exceeded ${draftMaxChars} chars (${body.length}); forcing new message`,
+        `discord(camus): rollover body=${body.length} head=${firstBody.length} carry=${carryOver.length}`,
       );
+      // Final update to the current Discord message with the fitting head.
+      hasStreamedMessage = true;
+      lastPartialText = firstBody;
+      draftStream.update(firstBody);
+      // Start a new Discord message for the carryover.
       draftStream.forceNewMessage();
-      const tail = camusActiveText || "";
+      // The portion we removed from activeText is now "delivered" — advance
+      // committedLen so the next partial doesn't re-peel it from cleaned.
+      const consumed = Math.max(0, camusActiveText.length - carryOver.length);
+      camusCommittedLen = Math.min(camusRawActive.length, camusCommittedLen + consumed);
       camusTimeline.length = 0;
-      camusActiveText = tail;
+      camusActiveText = carryOver;
       body = camusRender();
       if (!body) return;
     }
@@ -458,8 +519,13 @@ export function createDiscordDraftPreviewController(params: {
       if (!draftStream || !text) {
         return;
       }
+      // Strip runtime scaffolding (<system-reminder>, <previous_response>, …) BEFORE
+      // any other processing. Some runtimes (notably claude-cli) echo injected
+      // system reminders back inside the assistant cumulative text — without
+      // this strip they would leak into the visible Discord preview.
+      const sanitized = stripInternalRuntimeScaffolding(text);
       const cleaned = stripInlineDirectiveTagsForDelivery(
-        stripReasoningTagsFromText(text, { mode: "strict", trim: "both" }),
+        stripReasoningTagsFromText(sanitized, { mode: "strict", trim: "both" }),
       ).text;
       if (!cleaned || cleaned.startsWith("Reasoning:\n")) {
         return;
@@ -570,11 +636,7 @@ export function createDiscordDraftPreviewController(params: {
         const hasStreamedPartialBody =
           discordStreamMode === "partial" &&
           (camusTimeline.length > 0 || camusActiveText.trim().length > 0);
-        if (
-          !finalReplyDelivered &&
-          !finalizedViaPreviewMessage &&
-          draftStream?.messageId()
-        ) {
+        if (!finalReplyDelivered && !finalizedViaPreviewMessage && draftStream?.messageId()) {
           if (hasStreamedPartialBody) {
             // Flush any in-flight active text into the timeline first so the
             // sealed message contains everything the runtime delivered.

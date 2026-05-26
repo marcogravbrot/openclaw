@@ -193,60 +193,16 @@ export function createDiscordDraftPreviewController(params: {
     return maxLen;
   };
 
-  const camusUpdateStream = () => {
+  const camusUpdateStream = async (): Promise<void> => {
     if (!draftStream) return;
-    let body = camusRender();
+    const body = camusRender();
     if (!body) return;
-    if (body.length > draftMaxChars) {
-      // Body would overflow the 2000-char Discord message cap. Roll over to a
-      // new message at a natural boundary:
-      //   1. Compute timeline-only rendering (segments already committed).
-      //   2. See how much of `camusActiveText` still fits after the timeline.
-      //   3. Final-update the current message with `timeline + head`.
-      //   4. Force a new Discord message starting from `tail` (the unsent
-      //      portion of activeText), so its content does NOT duplicate what is
-      //      already in the previous message.
-      //   5. Advance `camusCommittedLen` past the head so subsequent partials
-      //      peel only NEW text from the runtime cumulative.
-      const timelineBody = camusRenderSegments(false);
-      const sep = timelineBody ? "\n\n" : "";
-      const roomForActive = draftMaxChars - timelineBody.length - sep.length;
-      let firstBody: string;
-      let carryOver: string;
-      if (roomForActive <= 0) {
-        // Timeline alone fills the message. Truncate timeline; keep activeText
-        // for the next message.
-        firstBody = timelineBody.slice(0, draftMaxChars);
-        carryOver = camusActiveText;
-      } else if (camusActiveText.length <= roomForActive) {
-        // Shouldn't normally happen (we only entered this branch because body
-        // > draftMaxChars), but be defensive: hard-cut the body.
-        firstBody = body.slice(0, draftMaxChars);
-        carryOver = body.slice(draftMaxChars);
-      } else {
-        const splitAt = camusFindSplitPoint(camusActiveText, roomForActive);
-        const head = camusActiveText.slice(0, splitAt).trimEnd();
-        carryOver = camusActiveText.slice(splitAt).replace(/^\s+/, "");
-        firstBody = timelineBody + sep + head;
-      }
-      params.log(
-        `discord(camus): rollover body=${body.length} head=${firstBody.length} carry=${carryOver.length}`,
-      );
-      // Final update to the current Discord message with the fitting head.
-      hasStreamedMessage = true;
-      lastPartialText = firstBody;
-      draftStream.update(firstBody);
-      // Start a new Discord message for the carryover.
-      draftStream.forceNewMessage();
-      // The portion we removed from activeText is now "delivered" — advance
-      // committedLen so the next partial doesn't re-peel it from cleaned.
-      const consumed = Math.max(0, camusActiveText.length - carryOver.length);
-      camusCommittedLen = Math.min(camusRawActive.length, camusCommittedLen + consumed);
-      camusTimeline.length = 0;
-      camusActiveText = carryOver;
-      body = camusRender();
-      if (!body) return;
-    }
+    // No caller-side rollover: draftStream is fully idempotent and handles
+    // multi-message splitting internally. Each update() call re-renders the
+    // FULL cumulative body across N Discord message slots — slots that didn't
+    // change skip their API call. This eliminates the throttle-queue race
+    // between firstBody/forceNewMessage/body that produced duplicated
+    // headings and out-of-order messages.
     hasStreamedMessage = true;
     lastPartialText = body;
     draftStream.update(body);
@@ -309,10 +265,10 @@ export function createDiscordDraftPreviewController(params: {
     lastReasoningProgressLine = undefined;
   };
 
-  const forceNewMessageIfNeeded = () => {
+  const forceNewMessageIfNeeded = async (): Promise<void> => {
     if (shouldSplitPreviewMessages && hasStreamedMessage) {
       params.log("discord: calling forceNewMessage() for draft stream");
-      draftStream?.forceNewMessage();
+      await draftStream?.forceNewMessage();
     }
     resetProgressState();
   };
@@ -378,7 +334,7 @@ export function createDiscordDraftPreviewController(params: {
         // properly separated text segments around tool calls.
         camusCommitActiveText();
         if (!camusShowToolProgress) {
-          camusUpdateStream();
+          await camusUpdateStream();
           return;
         }
         // Dedup by per-invocation toolCallId when provided (so progress updates
@@ -393,7 +349,7 @@ export function createDiscordDraftPreviewController(params: {
         } else {
           camusTimeline.push({ kind: "tool", key, line: progressLine });
         }
-        camusUpdateStream();
+        await camusUpdateStream();
         return;
       }
       if (discordStreamMode !== "progress") {
@@ -471,7 +427,7 @@ export function createDiscordDraftPreviewController(params: {
         await renderProgressDraft();
       }
     },
-    resolvePreviewFinalText(text?: string) {
+    async resolvePreviewFinalText(text?: string) {
       if (discordStreamMode === "partial") {
         // camus: the streamed timeline IS the final message. Commit any
         // trailing active text, then return the rendered body so the caller
@@ -479,7 +435,7 @@ export function createDiscordDraftPreviewController(params: {
         // (which would post a fresh reply containing only the last block of
         // assistant text from claude-cli, throwing the streamed body away).
         camusCommitActiveText();
-        camusUpdateStream();
+        await camusUpdateStream();
         return camusRender() || undefined;
       }
       if (typeof text !== "string") {
@@ -514,7 +470,7 @@ export function createDiscordDraftPreviewController(params: {
       }
       return trimmed;
     },
-    updateFromPartial(text?: string) {
+    async updateFromPartial(text?: string) {
       if (!draftStream || !text) {
         return;
       }
@@ -569,7 +525,7 @@ export function createDiscordDraftPreviewController(params: {
         }
         camusRawActive = cleaned;
         camusActiveText = cleaned.slice(camusCommittedLen).replace(/^\s+/, "");
-        camusUpdateStream();
+        await camusUpdateStream();
         return;
       }
 
@@ -598,7 +554,7 @@ export function createDiscordDraftPreviewController(params: {
         },
       });
     },
-    handleAssistantMessageBoundary() {
+    async handleAssistantMessageBoundary() {
       if (discordStreamMode === "progress") {
         return;
       }
@@ -606,10 +562,10 @@ export function createDiscordDraftPreviewController(params: {
         // camus: commit the in-progress assistant block to the timeline so the
         // next text block is appended below rather than replacing it.
         camusCommitActiveText();
-        camusUpdateStream();
+        await camusUpdateStream();
         return;
       }
-      forceNewMessageIfNeeded();
+      await forceNewMessageIfNeeded();
     },
     async flush() {
       if (!draftStream) {
@@ -649,11 +605,12 @@ export function createDiscordDraftPreviewController(params: {
             // Flush any in-flight active text into the timeline first so the
             // sealed message contains everything the runtime delivered.
             camusCommitActiveText();
-            camusUpdateStream();
+            await camusUpdateStream();
             await draftStream.flush();
             await draftStream.seal();
           } else {
-            await draftStream.clear();
+            // clearAll so all preview slots get deleted, not just the last.
+            await draftStream.clearAll();
           }
         }
       } catch (err) {

@@ -334,6 +334,21 @@ function finishTurn(session: ClaudeLiveSession, output: CliOutput): void {
   cliBackendLog.info(
     `claude live session turn: provider=${session.providerId} model=${session.modelId} durationMs=${Date.now() - turn.startedAtMs} rawLines=${turn.rawLines.length}`,
   );
+  // Unconditional cache-stat surface so we can verify whether the system
+  // prompt is hitting the prompt cache. cacheRead = cache-hit input tokens,
+  // cacheWrite = cache-creation tokens (paid once). On a stable session,
+  // turn 1 should show cacheWrite≫0, turn 2+ cacheRead≫0 and input small.
+  const u = output.usage;
+  if (u) {
+    const cachedShare =
+      (u.input ?? 0) + (u.cacheRead ?? 0) > 0
+        ? Math.round(((u.cacheRead ?? 0) / ((u.input ?? 0) + (u.cacheRead ?? 0))) * 100)
+        : 0;
+    cliBackendLog.info(
+      `[usage] model=${session.modelId} input=${u.input ?? 0} cacheRead=${u.cacheRead ?? 0} ` +
+        `cacheWrite=${u.cacheWrite ?? 0} output=${u.output ?? 0} cachedShare=${cachedShare}%`,
+    );
+  }
   clearTurnTimers(turn);
   turn.streamingParser.finish();
   session.currentTurn = null;
@@ -547,7 +562,11 @@ function handleClaudeLiveLine(session: ClaudeLiveSession, line: string): void {
   // so we can see whether `--settings` Stop hooks are firing per turn.
   // Driven by --include-hook-events; events look like
   // {type:"system", subtype:"hook_started"|"hook_response", hook_name:..., outcome:...}
-  if (parsed.type === "system" && typeof parsed.subtype === "string" && (parsed.subtype as string).startsWith("hook_")) {
+  if (
+    parsed.type === "system" &&
+    typeof parsed.subtype === "string" &&
+    (parsed.subtype as string).startsWith("hook_")
+  ) {
     const hookName = typeof parsed.hook_name === "string" ? parsed.hook_name : "?";
     const outcome = typeof parsed.outcome === "string" ? ` outcome=${parsed.outcome}` : "";
     const exitCode = typeof parsed.exit_code === "number" ? ` exit=${parsed.exit_code}` : "";

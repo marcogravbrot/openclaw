@@ -564,7 +564,7 @@ export async function processDiscordMessage(
           const hasMedia = reply.hasMedia;
           const ttsSupplement = getReplyPayloadTtsSupplement(effectivePayload);
           const previewSourceText = finalText ?? ttsSupplement?.spokenText;
-          const previewFinalText = draftPreview.resolvePreviewFinalText(previewSourceText);
+          const previewFinalText = await draftPreview.resolvePreviewFinalText(previewSourceText);
           const previewReplyToId = replyReference.peek();
           const hasExplicitReplyDirective =
             Boolean(effectivePayload.replyToTag || effectivePayload.replyToCurrent) ||
@@ -577,7 +577,13 @@ export async function processDiscordMessage(
             adapter: defineFinalizableLivePreviewAdapter({
               draft: {
                 flush: () => draftPreview.flush(),
-                clear: () => draftStream.clear(),
+                // Use clearAll so ALL preview slot messages are deleted on
+                // fallback to deliverNormally — not just the last one. The
+                // lifecycle's clear() only knows about a single message id;
+                // with multi-message streaming, leftover earlier slots would
+                // remain in Discord while a fresh chunked reply gets posted,
+                // producing the duplication we saw.
+                clear: () => draftStream.clearAll(),
                 discardPending: () => draftStream.discardPending(),
                 seal: () => draftStream.seal(),
                 id: draftStream.messageId,
@@ -590,6 +596,15 @@ export async function processDiscordMessage(
                   hasExplicitReplyDirective ||
                   payload.isError
                 ) {
+                  return undefined;
+                }
+                // Edit-in-place can only place ONE message body; if the final
+                // content exceeds Discord's 2000-char cap OR the stream produced
+                // multiple preview slots, fall through to deliverNormally which
+                // chunks the full body correctly. Returning undefined makes
+                // deliverFinalizableLivePreview take the fallback path
+                // (discardPending → deliverNormally → clear all slots).
+                if (previewFinalText.length > 2000 || draftStream.messageIds().length > 1) {
                   return undefined;
                 }
                 return {

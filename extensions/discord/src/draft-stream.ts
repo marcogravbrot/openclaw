@@ -97,18 +97,19 @@ export function createDiscordDraftStream(params: {
   };
 
   // Count markdown markers in a chunk and return which ones are unclosed,
-  // ordered for proper close/reopen. Counts occurrences outside of code
-  // fences/inline-code; if odd, the marker is dangling.
+  // ordered for proper close/reopen. Only the unambiguous markers are
+  // balanced (`**`, `__`, ```` ``` ````, `` ` ``); single `*` and `_` are
+  // skipped because file paths (`node_modules`, `use_state`) and code
+  // contain them constantly without intending italic, and Discord's italic
+  // rendering is word-boundary sensitive enough that lone counts are noisy.
   const detectOrphanMarkers = (chunk: string): string[] => {
-    // Walk the chunk once tracking whether we're inside a triple-backtick
-    // fence or single-backtick inline. Outside those, count ** __ * _.
     const orphans: string[] = [];
     let inFence = false;
     let inInline = false;
     let fenceCount = 0;
     let inlineCount = 0;
     let i = 0;
-    const counts: Record<string, number> = { "**": 0, __: 0, "*": 0, _: 0 };
+    const counts: Record<string, number> = { "**": 0, __: 0 };
     while (i < chunk.length) {
       if (!inInline && chunk.startsWith("```", i)) {
         fenceCount++;
@@ -136,14 +137,11 @@ export function createDiscordDraftStream(params: {
         i += 2;
         continue;
       }
-      const ch = chunk[i];
-      if (ch === "*") counts["*"]++;
-      else if (ch === "_") counts._++;
       i += 1;
     }
     if (fenceCount % 2 === 1) orphans.push("```");
     else if (inlineCount % 2 === 1) orphans.push("`");
-    for (const marker of ["**", "__", "*", "_"] as const) {
+    for (const marker of ["**", "__"] as const) {
       if (counts[marker] % 2 === 1) orphans.push(marker);
     }
     return orphans;
@@ -162,7 +160,22 @@ export function createDiscordDraftStream(params: {
         out.push(prefix + trimmed.slice(pos));
         break;
       }
-      const splitAt = findSplitPoint(trimmed, pos, room);
+      let splitAt = findSplitPoint(trimmed, pos, room);
+      // Never bisect a 2-char marker (`**`, `__`, double-backtick). If splitAt
+      // lands between two identical marker chars, back off by 1 so the whole
+      // marker stays in the NEXT slot. Otherwise the orphan detector sees a
+      // lone trailing `*` and injects a closer, leaving a stray `*` on its
+      // own at the end of the previous Discord message.
+      while (
+        splitAt > pos + 1 &&
+        splitAt < trimmed.length &&
+        (trimmed[splitAt - 1] === "*" ||
+          trimmed[splitAt - 1] === "_" ||
+          trimmed[splitAt - 1] === "`") &&
+        trimmed[splitAt - 1] === trimmed[splitAt]
+      ) {
+        splitAt -= 1;
+      }
       let chunk = prefix + trimmed.slice(pos, splitAt);
       const orphans = detectOrphanMarkers(chunk);
       let nextPrefix = "";

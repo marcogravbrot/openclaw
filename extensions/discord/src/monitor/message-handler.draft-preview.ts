@@ -162,7 +162,24 @@ export function createDiscordDraftPreviewController(params: {
       const seg = renderedSegs[i];
       if (i > 0) {
         const prev = renderedSegs[i - 1];
-        out += prev.kind === "tool" && seg.kind === "tool" ? "\n" : "\n\n";
+        if (prev.kind === "tool" && seg.kind === "tool") {
+          out += "\n";
+        } else if (prev.kind === "text" && seg.kind === "text") {
+          // Two text segments back-to-back means a tool boundary fired
+          // between them (often hidden via OPENCLAW_DISCORD_HIDE_TOOL_PROGRESS).
+          // Don't force a paragraph break mid-sentence: if the previous
+          // segment doesn't end with sentence-terminating punctuation /
+          // newline AND the next doesn't start with whitespace, join with
+          // a single space so "Now the" + "Apollo cache merge fix:" reads
+          // as one sentence instead of two paragraphs.
+          if (/[.!?:\n]\s*$/.test(prev.text) || /^\s/.test(seg.text)) {
+            out += "\n\n";
+          } else {
+            out += " ";
+          }
+        } else {
+          out += "\n\n";
+        }
       }
       out += seg.text;
     }

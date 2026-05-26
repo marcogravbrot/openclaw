@@ -474,9 +474,15 @@ export function createDiscordDraftPreviewController(params: {
       if (!draftStream || !text) {
         return;
       }
-      const cleaned = stripInlineDirectiveTagsForDelivery(
+      const rawCleaned = stripInlineDirectiveTagsForDelivery(
         stripReasoningTagsFromText(text, { mode: "strict", trim: "both" }),
       ).text;
+      // Repair mid-word newlines that occasionally leak from claude-cli SSE
+      // chunk boundaries (e.g. "log\nged"). A newline mid-word is never
+      // legitimate prose — list/header/blockquote markers always trail a
+      // newline with whitespace or a punctuation marker, so [a-z0-9]\n[a-z]
+      // can only be a token boundary.
+      const cleaned = rawCleaned.replace(/([A-Za-z0-9])\n([a-z])/g, "$1$2");
       if (!cleaned || cleaned.startsWith("Reasoning:\n")) {
         return;
       }

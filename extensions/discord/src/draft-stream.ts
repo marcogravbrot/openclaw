@@ -69,16 +69,116 @@ export function createDiscordDraftStream(params: {
   const messageIds: Array<string | undefined> = [];
   const lastChunks: string[] = [];
 
-  // Hard-cut the cumulative text into maxChars-sized chunks. Marco's directive:
-  // don't care WHERE the split lands, just get every char through in order.
-  // Skipping fancy boundary logic eliminates the markdown-split / mid-word /
-  // race-with-caller issues we kept tripping over.
+  // Walk forward through the cumulative text, slicing into <=maxChars chunks.
+  // Within each chunk, prefer to break at a logical boundary (paragraph >
+  // line > sentence > word) when one exists in the trailing 25% of the
+  // window; otherwise hard-cut at maxChars. After picking each boundary we
+  // balance unclosed markdown markers (** __ * _ ``` `) by appending a
+  // closer to the current chunk and reopening at the start of the next.
+  const findSplitPoint = (text: string, start: number, hardMax: number): number => {
+    const end = start + hardMax;
+    if (end >= text.length) return text.length;
+    const minAcceptable = start + Math.floor(hardMax * 0.75);
+    const window = text.slice(start, end);
+    const offset = (rel: number) => start + rel;
+    const para = window.lastIndexOf("\n\n");
+    if (offset(para) >= minAcceptable) return offset(para) + 2;
+    const nl = window.lastIndexOf("\n");
+    if (offset(nl) >= minAcceptable) return offset(nl) + 1;
+    let sentence = -1;
+    for (const marker of [". ", "! ", "? "]) {
+      const idx = window.lastIndexOf(marker);
+      if (idx > sentence) sentence = idx;
+    }
+    if (offset(sentence) >= minAcceptable) return offset(sentence) + 2;
+    const space = window.lastIndexOf(" ");
+    if (offset(space) >= minAcceptable) return offset(space) + 1;
+    return end;
+  };
+
+  // Count markdown markers in a chunk and return which ones are unclosed,
+  // ordered for proper close/reopen. Counts occurrences outside of code
+  // fences/inline-code; if odd, the marker is dangling.
+  const detectOrphanMarkers = (chunk: string): string[] => {
+    // Walk the chunk once tracking whether we're inside a triple-backtick
+    // fence or single-backtick inline. Outside those, count ** __ * _.
+    const orphans: string[] = [];
+    let inFence = false;
+    let inInline = false;
+    let fenceCount = 0;
+    let inlineCount = 0;
+    let i = 0;
+    const counts: Record<string, number> = { "**": 0, __: 0, "*": 0, _: 0 };
+    while (i < chunk.length) {
+      if (!inInline && chunk.startsWith("```", i)) {
+        fenceCount++;
+        inFence = !inFence;
+        i += 3;
+        continue;
+      }
+      if (!inFence && chunk[i] === "`") {
+        inlineCount++;
+        inInline = !inInline;
+        i += 1;
+        continue;
+      }
+      if (inFence || inInline) {
+        i += 1;
+        continue;
+      }
+      if (chunk.startsWith("**", i)) {
+        counts["**"]++;
+        i += 2;
+        continue;
+      }
+      if (chunk.startsWith("__", i)) {
+        counts.__++;
+        i += 2;
+        continue;
+      }
+      const ch = chunk[i];
+      if (ch === "*") counts["*"]++;
+      else if (ch === "_") counts._++;
+      i += 1;
+    }
+    if (fenceCount % 2 === 1) orphans.push("```");
+    else if (inlineCount % 2 === 1) orphans.push("`");
+    for (const marker of ["**", "__", "*", "_"] as const) {
+      if (counts[marker] % 2 === 1) orphans.push(marker);
+    }
+    return orphans;
+  };
+
   const computeChunks = (text: string): string[] => {
     const trimmed = text.trimEnd();
     if (!trimmed) return [];
     const out: string[] = [];
-    for (let i = 0; i < trimmed.length; i += maxChars) {
-      out.push(trimmed.slice(i, i + maxChars));
+    let pos = 0;
+    let prefix = "";
+    while (pos < trimmed.length) {
+      const remaining = trimmed.length - pos;
+      const room = maxChars - prefix.length;
+      if (remaining + prefix.length <= maxChars) {
+        out.push(prefix + trimmed.slice(pos));
+        break;
+      }
+      const splitAt = findSplitPoint(trimmed, pos, room);
+      let chunk = prefix + trimmed.slice(pos, splitAt);
+      const orphans = detectOrphanMarkers(chunk);
+      let nextPrefix = "";
+      if (orphans.length > 0) {
+        // Close orphans at end of this chunk; reopen at start of next so the
+        // visual style continues across the message boundary.
+        const closer = orphans.slice().reverse().join("");
+        const opener = orphans.join("");
+        if (chunk.length + closer.length <= maxChars) {
+          chunk = chunk + closer;
+          nextPrefix = opener;
+        }
+      }
+      out.push(chunk);
+      pos = splitAt;
+      prefix = nextPrefix;
     }
     return out;
   };
@@ -221,20 +321,21 @@ export function createDiscordDraftStream(params: {
   // but stranded earlier slots when we moved to multi-message. clearAll()
   // stops the stream, deletes every slot's Discord message, and resets state.
   const clearAll = async (): Promise<void> => {
+    console.log(`[discord-stream] clearAll: ENTRY, messageIds.length=${messageIds.length}`);
     streamState.stopped = true;
     loop.stop();
     await loop.waitForInFlight();
     const ids = messageIds.filter((id): id is string => typeof id === "string");
+    console.log(`[discord-stream] clearAll: deleting ${ids.length} slot(s) [${ids.join(", ")}]`);
     messageIds.length = 0;
     lastChunks.length = 0;
     loop.resetPending();
     for (const id of ids) {
       try {
         await deleteChannelMessage(rest, channelId, id);
+        console.log(`[discord-stream] clearAll: deleted ${id}`);
       } catch (err) {
-        params.warn?.(
-          `discord stream preview clearAll: delete ${id} failed: ${formatErrorMessage(err)}`,
-        );
+        console.log(`[discord-stream] clearAll: delete ${id} FAILED: ${formatErrorMessage(err)}`);
       }
     }
   };

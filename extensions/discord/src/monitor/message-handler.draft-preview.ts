@@ -280,6 +280,9 @@ export function createDiscordDraftPreviewController(params: {
     get isProgressMode() {
       return discordStreamMode === "progress";
     },
+    get isPartialMode() {
+      return discordStreamMode === "partial";
+    },
     get hasProgressDraftStarted() {
       return progressDraftGate.hasStarted;
     },

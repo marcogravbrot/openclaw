@@ -571,6 +571,41 @@ export async function processDiscordMessage(
             (typeof previewSourceText === "string" &&
               /\[\[\s*reply_to(?:_current|\s*:)/i.test(previewSourceText));
 
+          // In partial-mode, the streamed slots already render `previewFinalText`
+          // (camusRender is the source for both the live stream AND the final
+          // text). Multi-slot overflow MUST NOT take the deliverNormally
+          // fallback — that path posts a fresh chunked reply from
+          // effectivePayload.text (the runtime's last assistant message
+          // segment, often a short tail) and then clearAll() nukes every
+          // streamed slot the user was already reading. Instead: flush +
+          // seal the slots in place so they become the final reply, and
+          // skip the adapter dance entirely.
+          if (
+            draftPreview.isPartialMode &&
+            typeof previewFinalText === "string" &&
+            previewFinalText.length > 0 &&
+            draftStream.messageIds().length >= 1 &&
+            !hasMedia &&
+            !ttsSupplement &&
+            !hasExplicitReplyDirective &&
+            !payload.isError
+          ) {
+            console.log(
+              `[discord-finalize] partial-mode seal: slots=${draftStream.messageIds().length} finalLen=${previewFinalText.length}`,
+            );
+            try {
+              await draftStream.flush();
+              await draftStream.seal();
+              draftPreview.markFinalReplyDelivered();
+              draftPreview.markPreviewFinalized();
+              replyReference.markSent();
+              observer?.onFinalReplyDelivered?.();
+            } catch (err) {
+              console.log(`[discord-finalize] partial-mode seal failed: ${String(err)}`);
+            }
+            return;
+          }
+
           const result = await deliverWithFinalizableLivePreviewAdapter({
             kind: info.kind,
             payload: effectivePayload,
@@ -583,12 +618,23 @@ export async function processDiscordMessage(
                 // with multi-message streaming, leftover earlier slots would
                 // remain in Discord while a fresh chunked reply gets posted,
                 // producing the duplication we saw.
-                clear: () => draftStream.clearAll(),
-                discardPending: () => draftStream.discardPending(),
+                clear: () => {
+                  console.log(
+                    `[discord-finalize] adapter.draft.clear() invoked, routing to draftStream.clearAll()`,
+                  );
+                  return draftStream.clearAll();
+                },
+                discardPending: () => {
+                  console.log(`[discord-finalize] adapter.draft.discardPending() invoked`);
+                  return draftStream.discardPending();
+                },
                 seal: () => draftStream.seal(),
                 id: draftStream.messageId,
               },
               buildFinalEdit: () => {
+                console.log(
+                  `[discord-finalize] buildFinalEdit ENTRY: finalizedViaPreviewMessage=${draftPreview.finalizedViaPreviewMessage} hasMedia=${hasMedia} ttsSupplement=${Boolean(ttsSupplement)} previewFinalText.type=${typeof previewFinalText} previewFinalText.len=${typeof previewFinalText === "string" ? previewFinalText.length : "n/a"} hasExplicitReplyDirective=${hasExplicitReplyDirective} payload.isError=${Boolean(payload.isError)} slots=${draftStream.messageIds().length}`,
+                );
                 if (
                   draftPreview.finalizedViaPreviewMessage ||
                   (hasMedia && !ttsSupplement) ||
@@ -596,6 +642,7 @@ export async function processDiscordMessage(
                   hasExplicitReplyDirective ||
                   payload.isError
                 ) {
+                  console.log(`[discord-finalize] buildFinalEdit -> undefined (early guard)`);
                   return undefined;
                 }
                 // Edit-in-place can only place ONE message body; if the final
@@ -604,9 +651,17 @@ export async function processDiscordMessage(
                 // chunks the full body correctly. Returning undefined makes
                 // deliverFinalizableLivePreview take the fallback path
                 // (discardPending → deliverNormally → clear all slots).
-                if (previewFinalText.length > 2000 || draftStream.messageIds().length > 1) {
+                const slotCount = draftStream.messageIds().length;
+                const finalLen = previewFinalText.length;
+                if (finalLen > 2000 || slotCount > 1) {
+                  console.log(
+                    `[discord-finalize] buildFinalEdit -> fallback (finalLen=${finalLen}, slots=${slotCount})`,
+                  );
                   return undefined;
                 }
+                console.log(
+                  `[discord-finalize] buildFinalEdit -> edit-in-place (finalLen=${finalLen}, slots=${slotCount})`,
+                );
                 return {
                   content: previewFinalText,
                   ...(finalPreviewFlags ? { flags: finalPreviewFlags } : {}),

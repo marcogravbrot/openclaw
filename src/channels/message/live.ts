@@ -191,6 +191,7 @@ export async function deliverFinalizableLivePreview<TPayload, TId, TEdit>(params
     }
   }
 
+  console.log(`[live-preview] fallback: discardPending → deliverNormally → clear`);
   if (params.draft.discardPending) {
     await params.draft.discardPending();
   } else {
@@ -202,12 +203,16 @@ export async function deliverFinalizableLivePreview<TPayload, TId, TEdit>(params
   try {
     const result = await params.deliverNormally(params.payload);
     delivered = result !== false;
+    console.log(`[live-preview] deliverNormally returned delivered=${delivered}`);
     if (delivered) {
       await params.onNormalDelivered?.();
     }
   } finally {
     if (delivered) {
+      console.log(`[live-preview] running draft.clear() to delete preview slots`);
       await params.draft.clear();
+    } else {
+      console.log(`[live-preview] skipping draft.clear() because delivered=false`);
     }
   }
 
